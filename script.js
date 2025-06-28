@@ -298,6 +298,135 @@ function startNewMatch() {
   appState.matchTimeouts.push(timeout1)
 }
 
+//--------------------------------------------------------------------------------------------
+
+
+
+// This is a JavaScript (Node.js) rewrite of CombineTest.py with simplified features
+// Dependencies needed:
+// - ffmpeg (installed on system)
+// - node-fetch
+// - sharp
+// - @google/generative-ai
+// - fluent-ffmpeg
+// Install: npm install node-fetch sharp @google/generative-ai fluent-ffmpeg
+
+const fs = require('fs');
+const path = require('path');
+const sharp = require('sharp');
+const ffmpeg = require('fluent-ffmpeg');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fetch = require('node-fetch');
+
+// Settings
+const fps = 5;
+const recordSeconds = 300;
+const frameInterval = 30;
+const deathThreshold = 60;
+const framesFolder = "extracted_frames";
+const detectedFolder = "detected_frames";
+const heatmapOutput = "player_movement_heatmap.png";
+const reportOutput = "gameplay_feedback.txt";
+const geminiOutput = "gemini_outputs.jsonl";
+const modelName = "gemini-1.5-flash";
+
+// Gemini setup
+const genAI = new GoogleGenerativeAI("YOUR_API_KEY_HERE");
+
+const geminiPrompt = `Look at the image and tell me if the player has started any game, also give me name of the game if in-game, state if the person is in lobby or match, identify the gun if possible or suggest likely gun used most, provide output in JSON format including game state and improvement tips based on performance and weapon usage.`;
+
+function ensureDirs() {
+  if (!fs.existsSync(framesFolder)) fs.mkdirSync(framesFolder);
+  if (!fs.existsSync(detectedFolder)) fs.mkdirSync(detectedFolder);
+}
+
+function recordScreen(outputFile, callback) {
+  console.log(`[INFO] Recording screen for ${recordSeconds}s as ${outputFile}`);
+  ffmpeg()
+    .input('desktop')
+    .inputFormat('gdigrab')
+    .fps(fps)
+    .duration(recordSeconds)
+    .output(outputFile)
+    .on('end', () => {
+      console.log('[INFO] Recording complete.');
+      callback();
+    })
+    .on('error', err => {
+      console.error('[ERROR] Recording failed:', err);
+    })
+    .run();
+}
+
+function extractFrames(videoPath, callback) {
+  console.log('[INFO] Extracting frames...');
+  ffmpeg(videoPath)
+    .output(`${framesFolder}/frame_%04d.jpg`)
+    .outputOptions([`-vf fps=${fps / frameInterval}`])
+    .on('end', () => {
+      console.log('[INFO] Frames extracted.');
+      callback();
+    })
+    .on('error', err => console.error('[ERROR] Frame extraction failed:', err))
+    .run();
+}
+
+async function runGeminiAnalysis() {
+  console.log('[INFO] Starting Gemini analysis...');
+  const model = genAI.getGenerativeModel({ model: modelName });
+  const output = fs.createWriteStream(geminiOutput, { flags: 'a' });
+  const images = fs.readdirSync(framesFolder).filter(f => f.endsWith('.jpg'));
+
+  for (const img of images) {
+    const imgPath = path.join(framesFolder, img);
+    try {
+      const imageBase64 = fs.readFileSync(imgPath, { encoding: 'base64' });
+      const res = await model.generateContent({
+        contents: [
+          { role: "user", parts: [
+            { text: geminiPrompt },
+            { inlineData: { mimeType: "image/jpeg", data: imageBase64 } }
+          ] }
+        ]
+      });
+      output.write(JSON.stringify({ image: img, output: res.response.text }) + "\n");
+      console.log(`[Gemini] ${img} analyzed.`);
+    } catch (err) {
+      console.error(`[ERROR] Gemini failed for ${img}:`, err);
+    }
+  }
+
+  output.end();
+  console.log(`[INFO] Gemini analysis saved to ${geminiOutput}`);
+}
+
+function generateReport(deaths, totalFrames) {
+  let suggestions = "";
+  if (deaths === 0) suggestions = "Excellent play! No deaths detected.";
+  else if (deaths < 3) suggestions = "Good job. Focus on awareness and positioning.";
+  else suggestions = "Multiple deaths detected. Improve movement and defensive tactics.";
+
+  fs.writeFileSync(reportOutput, `=== AI Gameplay Feedback Report ===\nTotal Frames: ${totalFrames}\nDeaths: ${deaths}\n\nSuggestions:\n${suggestions}`);
+  console.log(`[INFO] Report saved to ${reportOutput}`);
+}
+
+function startFullAnalysis(customName) {
+  const videoFile = `${customName}.avi`;
+  ensureDirs();
+  recordScreen(videoFile, () => {
+    extractFrames(videoFile, () => {
+      runGeminiAnalysis();
+      generateReport(2, 100); // You may add detection logic for deaths later.
+    });
+  });
+}
+
+// Start the analysis
+const customName = "game_recording";
+startFullAnalysis(customName);
+
+// ----------------------------------------------
+
 // Stop match
 function stopMatch() {
   if (!appState.matchInProgress) return
@@ -333,30 +462,33 @@ function stopMatch() {
 
 // Submit API key
 function submitApiKey() {
-  const apiInput = document.getElementById("apiKeyInput")
-  const apiStatus = document.getElementById("apiStatus")
-  const apiKey = apiInput.value.trim()
+  const input = document.getElementById('apiKeyInput');
+  const status = document.getElementById('apiStatus');
+  const storedKey = localStorage.getItem('geminiApiKey');
 
-  if (!apiKey) {
-    showApiStatus("Please enter a Gemini API key", "error")
-    return
+  if (storedKey) {
+    status.textContent = 'API key is already set and locked.';
+    status.classList.add('show', 'success');
+    input.disabled = true;
+    console.log("IT worked ");
+    return;
   }
 
-  // Simulate API validation
-  apiStatus.style.display = "block"
-  apiStatus.textContent = "🔄 Validating Gemini API key..."
-  apiStatus.className = "api-status"
+  const key = input.value.trim();
 
-  setTimeout(() => {
-    if (apiKey.length >= 8) {
-      showApiStatus("✅ Gemini API key validated successfully", "success")
-      appState.apiKeySet = true
-      apiInput.value = "" // Clear input for security
-    } else {
-      showApiStatus("❌ Invalid Gemini API key format", "error")
-    }
-  }, 2000)
+  if (!key) {
+    status.textContent = 'Please enter a valid API key.';
+    status.classList.add('show', 'error');
+    return;
+  }
+
+  localStorage.setItem('geminiApiKey', key);
+  input.disabled = true;
+  status.textContent = 'API key saved and locked!';
+  status.classList.remove('error');
+  status.classList.add('show', 'success');
 }
+
 
 // Show API status
 function showApiStatus(message, type) {
@@ -454,3 +586,4 @@ document.addEventListener("DOMContentLoaded", () => {
     })
   })
 })
+
